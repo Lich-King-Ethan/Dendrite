@@ -3,7 +3,7 @@
 Ultra lightweight SlimeVR → VMT → PSMSx tracker forwarder.  
 It do the beep boop.
 
-## Ports (DON’T TOUCH THESE)
+## Ports:
 
 - SlimeVR OSC Out → `127.0.0.1:9002`
 - Dendrite listens on → `9002`
