@@ -109,6 +109,13 @@ namespace Dendrite
                         string trackerIdRaw = parts[2];
                         string field = parts[3];
 
+                        if (field.Equals("position", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine("[Dendrite] RX: Field 'position' ignored.");
+                            continue;
+                        }
+
                         if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
                         {
                             if (DebugLogging)
@@ -146,13 +153,16 @@ namespace Dendrite
                         if (DebugLogging)
                             Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
 
+                        // VMT /VMT/Room/UEuler:
+                        //   i: index, i: enabled, f: timeoffset,
+                        //   fff: position, fff: rotation
                         var args = new object[]
                         {
-                            vmtIndex,
-                            1,
-                            0.0f,
-                            0.0f, 0.0f, 0.0f,
-                            rx, ry, rz
+                            vmtIndex,          // i
+                            1,                 // i (enabled)
+                            0.0f,              // f time offset
+                            0.0f, 0.0f, 0.0f,  // fff position (zero)
+                            rx, ry, rz         // fff rotation
                         };
 
                         byte[] vmtBytes;
@@ -541,13 +551,27 @@ namespace Dendrite
                 if (address == null) throw new ArgumentNullException(nameof(address));
                 if (tags == null) throw new ArgumentNullException(nameof(tags));
                 if (args == null) throw new ArgumentNullException(nameof(args));
-                if (tags.Length != args.Length) throw new ArgumentException("tags length must equal args length.");
+
+                // Be forgiving: clamp to min length instead of throwing
+                int n = Math.Min(tags.Length, args.Length);
+                if (n <= 0)
+                    throw new ArgumentException("No tags/args to build OSC message.");
+
+                if (tags.Length != n)
+                    tags = tags.Substring(0, n);
+
+                if (args.Length != n)
+                {
+                    var trimmed = new object[n];
+                    Array.Copy(args, trimmed, n);
+                    args = trimmed;
+                }
 
                 var buf = new List<byte>();
                 WriteString(buf, address);
                 WriteString(buf, "," + tags);
 
-                for (int i = 0; i < tags.Length; i++)
+                for (int i = 0; i < n; i++)
                 {
                     char t = tags[i];
                     object a = args[i];
