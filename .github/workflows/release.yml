@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # so we can see all tags
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -31,20 +33,39 @@ jobs:
         id: get_tag
         shell: pwsh
         run: |
-          $tag = git tag --list "v*" | Sort-Object -Descending | Select-Object -First 1
-          if (-not $tag) {
-            $tag = "v0.1.0"
+          # Get the latest existing tag that looks like vX.Y.Z
+          $latest = git tag --list "v*" | Sort-Object -Descending | Select-Object -First 1
+
+          if (-not $latest) {
+              $new = "v0.1.0"
           } else {
-            if ($tag -match "v(\d+)\.(\d+)\.(\d+)") {
-              $major = [int]$matches[1]
-              $minor = [int]$matches[2]
-              $patch = [int]$matches[3] + 1
-              $tag = "v$major.$minor.$patch"
-            } else {
-              $tag = "v0.1.0"
-            }
+              if ($latest -match "v(\d+)\.(\d+)\.(\d+)") {
+                  $major = [int]$matches[1]
+                  $minor = [int]$matches[2]
+                  $patch = [int]$matches[3] + 1
+                  $new = "v$major.$minor.$patch"
+              } else {
+                  $new = "v0.1.0"
+              }
           }
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+          # Make sure this tag does NOT already exist on the remote
+          $existsRemote = git ls-remote --tags origin $new
+
+          while ($existsRemote) {
+              if ($new -match "v(\d+)\.(\d+)\.(\d+)") {
+                  $major = [int]$matches[1]
+                  $minor = [int]$matches[2]
+                  $patch = [int]$matches[3] + 1
+                  $new = "v$major.$minor.$patch"
+              } else {
+                  $new = "v0.1.0"
+              }
+              $existsRemote = git ls-remote --tags origin $new
+          }
+
+          Write-Host "Using tag $new"
+          echo "tag=$new" >> $env:GITHUB_OUTPUT
 
       - name: Zip publish output
         id: zip_it
@@ -60,11 +81,14 @@ jobs:
           echo "zip=$zipName" >> $env:GITHUB_OUTPUT
 
       - name: Create Git tag
+        shell: pwsh
         run: |
+          $tag = "${{ steps.get_tag.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag ${{ steps.get_tag.outputs.tag }}
-          git push origin ${{ steps.get_tag.outputs.tag }}
+          # Force-create/overwrite local tag (remote is guaranteed free by previous step)
+          git tag -f $tag
+          git push origin $tag
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -72,7 +96,4 @@ jobs:
           tag_name: ${{ steps.get_tag.outputs.tag }}
           name: "Dendrite ${{ steps.get_tag.outputs.tag }}"
           draft: false
-          prerelease: false
-          files: ${{ steps.zip_it.outputs.zip }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: fa
