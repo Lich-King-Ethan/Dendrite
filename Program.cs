@@ -31,20 +31,6 @@ internal static class Program
     // Debug logging toggle
     private const bool DebugLogging = true;
 
-    // Map SlimeVR tracker names -> VMT tracker indices
-    private static readonly Dictionary<string, int> TrackerIndexMap =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["hip"]         = 0,
-            ["chest"]       = 1,
-            ["left_foot"]   = 2,
-            ["right_foot"]  = 3,
-            ["left_knee"]   = 4,
-            ["right_knee"]  = 5,
-            ["left_elbow"]  = 6,
-            ["right_elbow"] = 7,
-        };
-
     public static void Main()
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -60,7 +46,34 @@ internal static class Program
         Console.WriteLine("[Dendrite] Check SlimeVR OSC settings: IP 127.0.0.1, port 9002.");
         Console.WriteLine();
 
-        using var slimeClient = new UdpClient(SlimePort);
+        // Try to bind the UDP port, but fail gracefully if something else is using it
+        UdpClient slimeClient;
+
+        try
+        {
+            slimeClient = new UdpClient(SlimePort);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"[Dendrite] ERROR: Could not bind to UDP port {SlimePort}.");
+            Console.WriteLine("[Dendrite] Something else is already using this port.");
+            PrintPortUsageInfo(SlimePort);
+            Console.WriteLine();
+            Console.WriteLine("Press Enter to exit...");
+            Console.ReadLine();
+            return;
+        }
+        catch (SocketException ex)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"[Dendrite] ERROR: Failed to bind UDP socket on port {SlimePort}: {ex.Message}");
+            Console.WriteLine();
+            Console.WriteLine("Press Enter to exit...");
+            Console.ReadLine();
+            return;
+        }
+
         using var vmtClient = new UdpClient();
         var vmtEndpoint = new IPEndPoint(IPAddress.Parse(VmtIp), VmtPort);
 
@@ -75,7 +88,7 @@ internal static class Program
             }
             catch (SocketException ex)
             {
-                Console.WriteLine($"[Dendrite] Socket error: {ex.Message}");
+                Console.WriteLine($"[Dendrite] Socket error while receiving: {ex.Message}");
                 continue;
             }
             catch (ObjectDisposedException)
@@ -111,6 +124,7 @@ internal static class Program
                 continue;
             }
 
+            // By default we expect /tracking/trackers/<name>/rotation
             var trackerName = parts[2];
             var field = parts[3];
 
@@ -128,12 +142,9 @@ internal static class Program
                 continue;
             }
 
-            if (!TrackerIndexMap.TryGetValue(trackerName, out int index))
-            {
-                if (DebugLogging)
-                    Console.WriteLine($"[Dendrite] RX: Unknown tracker '{trackerName}' (no VMT index mapped, ignored).");
-                continue;
-            }
+            // For now, just log the tracker name and treat it as index 0
+            // You can map names -> indices here if needed.
+            int index = 0;
 
             float rx = msg.GetFloat(0);
             float ry = msg.GetFloat(1);
@@ -281,6 +292,116 @@ internal static class Program
         }
 
         return null;
+    }
+
+    // -------------------------------------------------------------------
+    // Port usage inspector (who is hogging my UDP port?)
+    // -------------------------------------------------------------------
+    private static void PrintPortUsageInfo(int port)
+    {
+        try
+        {
+            Console.WriteLine();
+            Console.WriteLine($"[Dendrite] Trying to see who is using UDP port {port} (via netstat/tasklist)…");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "netstat",
+                Arguments = "-ano -p udp",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                Console.WriteLine("[Dendrite] netstat did not start.");
+                return;
+            }
+
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(3000);
+
+            var lines = output.Split('\n');
+            var pids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0)
+                    continue;
+                if (!line.StartsWith("UDP", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!line.Contains($":{port}"))
+                    continue;
+
+                var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5)
+                    continue;
+
+                string pid = parts[^1];
+                if (!string.IsNullOrWhiteSpace(pid))
+                    pids.Add(pid);
+            }
+
+            if (pids.Count == 0)
+            {
+                Console.WriteLine($"[Dendrite] Could not find any processes using UDP {port} via netstat.");
+                return;
+            }
+
+            Console.WriteLine($"[Dendrite] netstat shows these PIDs using UDP {port}: {string.Join(", ", pids)}");
+
+            foreach (var pid in pids)
+            {
+                try
+                {
+                    var psiTasklist = new ProcessStartInfo
+                    {
+                        FileName = "tasklist",
+                        Arguments = $"/FI \"PID eq {pid}\"",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+
+                    using var taskProc = Process.Start(psiTasklist);
+                    if (taskProc == null)
+                        continue;
+
+                    string tlOut = taskProc.StandardOutput.ReadToEnd();
+                    taskProc.WaitForExit(3000);
+
+                    var tlLines = tlOut.Split('\n');
+                    foreach (var tlRaw in tlLines)
+                    {
+                        var tl = tlRaw.Trim();
+                        if (tl.Length == 0)
+                            continue;
+                        if (tl.StartsWith("Image Name", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (tl.StartsWith("=", StringComparison.Ordinal))
+                            continue;
+                        if (char.IsLetterOrDigit(tl[0]))
+                        {
+                            Console.WriteLine($"[Dendrite] PID {pid} → {tl}");
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore tasklist failure
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Dendrite] Failed to run netstat/tasklist: {ex.Message}");
+        }
     }
 
     // -------------------------------------------------------------------
