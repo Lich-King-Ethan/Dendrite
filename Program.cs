@@ -86,98 +86,102 @@ namespace Dendrite
                         continue;
                     }
 
-                    var msg = OscMessage.Parse(data);
-                    if (msg == null)
+                    bool anyMessage = false;
+                    foreach (var msg in OscMessage.ParsePacket(data))
                     {
+                        anyMessage = true;
+
+                        if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] RX: Non-tracker OSC '{msg.Address}'.");
+                            continue;
+                        }
+
+                        var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length < 4)
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] RX: Malformed OSC address '{msg.Address}'.");
+                            continue;
+                        }
+
+                        string trackerIdRaw = parts[2];
+                        string field = parts[3];
+
+                        if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] RX: Field '{field}' ignored.");
+                            continue;
+                        }
+
+                        if (!int.TryParse(trackerIdRaw, out int trackerId))
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] RX: Tracker '{trackerIdRaw}' is not numeric.");
+                            continue;
+                        }
+
+                        if (trackerId < 1 || trackerId > 8)
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] RX: Tracker ID {trackerId} outside 1–8.");
+                            continue;
+                        }
+
+                        int vmtIndex = trackerId - 1;
+
+                        if (msg.Arguments.Count < 3)
+                        {
+                            if (DebugLogging)
+                                Console.WriteLine("[Dendrite] RX: Rotation missing args.");
+                            continue;
+                        }
+
+                        float rx = msg.GetFloat(0);
+                        float ry = msg.GetFloat(1);
+                        float rz = msg.GetFloat(2);
+
                         if (DebugLogging)
-                            Console.WriteLine("[Dendrite] RX: Unparseable OSC packet (ignored).");
-                        continue;
+                            Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
+
+                        var args = new object[]
+                        {
+                            vmtIndex,
+                            1,
+                            0.0f,
+                            0.0f, 0.0f, 0.0f,
+                            rx, ry, rz
+                        };
+
+                        byte[] vmtBytes;
+                        try
+                        {
+                            vmtBytes = OscMessage.Build("/VMT/Room/UEuler", "iiffffffff", args);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Dendrite] Build error: {ex.Message}");
+                            continue;
+                        }
+
+                        try
+                        {
+                            vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
+                            if (DebugLogging)
+                                Console.WriteLine($"[Dendrite] TX VMT idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Dendrite] Send error: {ex.Message}");
+                        }
                     }
 
-                    if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
+                    if (!anyMessage && DebugLogging)
                     {
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX: Non-tracker OSC '{msg.Address}'.");
-                        continue;
-                    }
-
-                    var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length < 4)
-                    {
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX: Malformed OSC address '{msg.Address}'.");
-                        continue;
-                    }
-
-                    string trackerIdRaw = parts[2];
-                    string field = parts[3];
-
-                    if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX: Field '{field}' ignored.");
-                        continue;
-                    }
-
-                    if (!int.TryParse(trackerIdRaw, out int trackerId))
-                    {
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX: Tracker '{trackerIdRaw}' is not numeric.");
-                        continue;
-                    }
-
-                    if (trackerId < 1 || trackerId > 8)
-                    {
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX: Tracker ID {trackerId} outside 1–8.");
-                        continue;
-                    }
-
-                    int vmtIndex = trackerId - 1;
-
-                    if (msg.Arguments.Count < 3)
-                    {
-                        if (DebugLogging)
-                            Console.WriteLine("[Dendrite] RX: Rotation missing args.");
-                        continue;
-                    }
-
-                    float rx = msg.GetFloat(0);
-                    float ry = msg.GetFloat(1);
-                    float rz = msg.GetFloat(2);
-
-                    if (DebugLogging)
-                        Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
-
-                    var args = new object[]
-                    {
-                        vmtIndex,
-                        1,
-                        0.0f,
-                        0.0f, 0.0f, 0.0f,
-                        rx, ry, rz
-                    };
-
-                    byte[] vmtBytes;
-                    try
-                    {
-                        vmtBytes = OscMessage.Build("/VMT/Room/UEuler", "iiffffffff", args);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Dendrite] Build error: {ex.Message}");
-                        continue;
-                    }
-
-                    try
-                    {
-                        vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] TX VMT idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Dendrite] Send error: {ex.Message}");
+                        Console.WriteLine("[Dendrite] RX: Unparseable OSC packet or bundle (no valid messages).");
+                        DumpPacketPreview(data);
                     }
                 }
             }
@@ -361,6 +365,33 @@ namespace Dendrite
             }
         }
 
+        // -------------------------------------------------------------------
+        // Packet preview dump (for debugging weird OSC)
+        // -------------------------------------------------------------------
+        private static void DumpPacketPreview(byte[] data)
+        {
+            try
+            {
+                int len = Math.Min(data.Length, 64);
+                var sbHex = new StringBuilder();
+                for (int i = 0; i < len; i++)
+                {
+                    sbHex.Append(data[i].ToString("X2")).Append(' ');
+                }
+
+                string ascii = Encoding.ASCII.GetString(data, 0, len);
+                ascii = ascii.Replace("\0", "·");
+
+                Console.WriteLine($"[Dendrite] Packet length: {data.Length} bytes");
+                Console.WriteLine($"[Dendrite] Hex (first {len}): {sbHex}");
+                Console.WriteLine($"[Dendrite] ASCII (first {len}): {ascii}");
+            }
+            catch
+            {
+                // best effort only
+            }
+        }
+
         private static void DrawHeader()
         {
             Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
@@ -377,7 +408,7 @@ namespace Dendrite
         }
 
         // ===================================================================
-        //  Minimal OSC implementation
+        //  Minimal OSC implementation (+ bundle support)
         // ===================================================================
         private sealed class OscMessage
         {
@@ -391,6 +422,62 @@ namespace Dendrite
                 TypeTag = typeTag;
             }
 
+            // Parse a whole OSC packet: either a single message or a #bundle
+            public static IEnumerable<OscMessage> ParsePacket(byte[] data)
+            {
+                if (data == null || data.Length < 4)
+                    yield break;
+
+                // Bundle: starts with "#bundle\0"
+                if (IsBundleHeader(data))
+                {
+                    int index = 0;
+                    string bundleTag = ReadString(data, ref index); // "#bundle"
+                    // skip 8-byte timetag
+                    if (index + 8 > data.Length)
+                        yield break;
+                    index += 8;
+
+                    while (index + 4 <= data.Length)
+                    {
+                        int size = ReadInt(data, ref index);
+                        if (size <= 0 || index + size > data.Length)
+                            break;
+
+                        var msgBytes = new byte[size];
+                        Buffer.BlockCopy(data, index, msgBytes, 0, size);
+                        index += size;
+
+                        var msg = Parse(msgBytes);
+                        if (msg != null)
+                            yield return msg;
+                    }
+                }
+                else
+                {
+                    var msg = Parse(data);
+                    if (msg != null)
+                        yield return msg;
+                }
+            }
+
+            private static bool IsBundleHeader(byte[] data)
+            {
+                if (data.Length < 8)
+                    return false;
+
+                // "#bundle\0" in ASCII
+                return data[0] == (byte)'#' &&
+                       data[1] == (byte)'b' &&
+                       data[2] == (byte)'u' &&
+                       data[3] == (byte)'n' &&
+                       data[4] == (byte)'d' &&
+                       data[5] == (byte)'l' &&
+                       data[6] == (byte)'e' &&
+                       data[7] == 0;
+            }
+
+            // Parse a single OSC message (no bundle wrapper)
             public static OscMessage? Parse(byte[] data)
             {
                 if (data == null || data.Length < 4)
@@ -491,7 +578,7 @@ namespace Dendrite
                     index++;
 
                 string s = Encoding.ASCII.GetString(data, start, index - start);
-                index++;
+                index++; // skip NUL
 
                 while (index % 4 != 0 && index < data.Length)
                     index++;
@@ -504,7 +591,11 @@ namespace Dendrite
                 if (index + 4 > data.Length)
                     throw new IndexOutOfRangeException();
 
-                int v = (data[index] << 24) | (data[index + 1] << 16) | (data[index + 2] << 8) | data[index + 3];
+                int v = (data[index] << 24) |
+                        (data[index + 1] << 16) |
+                        (data[index + 2] << 8) |
+                        data[index + 3];
+
                 index += 4;
                 return v;
             }
