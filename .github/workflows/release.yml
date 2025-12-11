@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write  # needed to create releases & tags
+  contents: write  # needed to create / update releases
 
 jobs:
   build-and-release:
@@ -15,8 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # so we can see all tags
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -27,73 +25,19 @@ jobs:
         run: dotnet restore
 
       - name: Publish self-contained EXE
-        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -p:IncludeNativeLibrariesForSelfExtract=true
-
-      - name: Determine next tag
-        id: get_tag
-        shell: pwsh
-        run: |
-          # Get the latest existing tag that looks like vX.Y.Z
-          $latest = git tag --list "v*" | Sort-Object -Descending | Select-Object -First 1
-
-          if (-not $latest) {
-              $new = "v0.1.0"
-          } else {
-              if ($latest -match "v(\d+)\.(\d+)\.(\d+)") {
-                  $major = [int]$matches[1]
-                  $minor = [int]$matches[2]
-                  $patch = [int]$matches[3] + 1
-                  $new = "v$major.$minor.$patch"
-              } else {
-                  $new = "v0.1.0"
-              }
-          }
-
-          # Make sure this tag does NOT already exist on the remote
-          $existsRemote = git ls-remote --tags origin $new
-
-          while ($existsRemote) {
-              if ($new -match "v(\d+)\.(\d+)\.(\d+)") {
-                  $major = [int]$matches[1]
-                  $minor = [int]$matches[2]
-                  $patch = [int]$matches[3] + 1
-                  $new = "v$major.$minor.$patch"
-              } else {
-                  $new = "v0.1.0"
-              }
-              $existsRemote = git ls-remote --tags origin $new
-          }
-
-          Write-Host "Using tag $new"
-          echo "tag=$new" >> $env:GITHUB_OUTPUT
+        run: dotnet publish Dendrite.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
       - name: Zip publish output
-        id: zip_it
-        shell: pwsh
         run: |
-          $tag = "${{ steps.get_tag.outputs.tag }}"
-          $publishPath = "bin/Release/net8.0/win-x64/publish"
-          if (-not (Test-Path $publishPath)) {
-            Write-Error "Publish path not found: $publishPath"
-          }
-          $zipName = "Dendrite-$tag-win-x64.zip"
-          Compress-Archive -Path "$publishPath/*" -DestinationPath $zipName -Force
-          echo "zip=$zipName" >> $env:GITHUB_OUTPUT
+          powershell -Command "Compress-Archive -Path 'publish/*' -DestinationPath 'Dendrite-win-x64.zip' -Force"
 
-      - name: Create Git tag
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.get_tag.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Force-create/overwrite local tag (remote is guaranteed free by previous step)
-          git tag -f $tag
-          git push origin $tag
-
-      - name: Create GitHub Release
+      - name: Create / Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_tag.outputs.tag }}
-          name: "Dendrite ${{ steps.get_tag.outputs.tag }}"
+          tag_name: dendrite-latest
+          name: "Dendrite (latest)"
           draft: false
-          prerelease: fa
+          prerelease: false
+          files: Dendrite-win-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
