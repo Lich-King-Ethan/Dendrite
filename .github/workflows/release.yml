@@ -1,0 +1,78 @@
+name: Build & Release Dendrite
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write  # needed to create releases & tags
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish self-contained EXE
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -p:IncludeNativeLibrariesForSelfExtract=true
+
+      - name: Determine next tag
+        id: get_tag
+        shell: pwsh
+        run: |
+          $tag = git tag --list "v*" | Sort-Object -Descending | Select-Object -First 1
+          if (-not $tag) {
+            $tag = "v0.1.0"
+          } else {
+            if ($tag -match "v(\d+)\.(\d+)\.(\d+)") {
+              $major = [int]$matches[1]
+              $minor = [int]$matches[2]
+              $patch = [int]$matches[3] + 1
+              $tag = "v$major.$minor.$patch"
+            } else {
+              $tag = "v0.1.0"
+            }
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Zip publish output
+        id: zip_it
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.get_tag.outputs.tag }}"
+          $publishPath = "bin/Release/net8.0/win-x64/publish"
+          if (-not (Test-Path $publishPath)) {
+            Write-Error "Publish path not found: $publishPath"
+          }
+          $zipName = "Dendrite-$tag-win-x64.zip"
+          Compress-Archive -Path "$publishPath/*" -DestinationPath $zipName -Force
+          echo "zip=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Create Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.get_tag.outputs.tag }}
+          git push origin ${{ steps.get_tag.outputs.tag }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "Dendrite ${{ steps.get_tag.outputs.tag }}"
+          draft: false
+          prerelease: false
+          files: ${{ steps.zip_it.outputs.zip }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
