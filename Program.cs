@@ -6,222 +6,206 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-namespace Dendrite;
-
-internal static class Program
+namespace Dendrite
 {
-    // ===================================================================
-    //  DENDRITE
-    //  Ultra lightweight SlimeVR → VMT → PSMSx forwarder
-    //  Rotation-only. It do the beep boop.
-    // ===================================================================
-
-    // PORTS (HEY FUCKASS — STOP CHANGING THESE):
-    //   SlimeVR OSC Out  -> 127.0.0.1:9002
-    //   Dendrite listens -> 0.0.0.0:9002
-    //   Dendrite -> VMT  -> 127.0.0.1:39570
-
-    private const int SlimePort = 9002;
-    private const string VmtIp = "127.0.0.1";
-    private const int VmtPort = 39570;
-
-    // One-time SteamVR registration
-    private const string SteamVrAppKey = "dendrite.osc.bridge";
-
-    // Debug logging toggle
-    private const bool DebugLogging = true;
-
-    public static void Main()
+    internal static class Program
     {
-        Console.OutputEncoding = Encoding.UTF8;
-        DrawHeader();
+        // ===================================================================
+        //  DENDRITE
+        //  Ultra lightweight SlimeVR → VMT → PSMSx forwarder
+        //  (it do the beep boop)
+        // ===================================================================
 
-        TryRegisterWithSteamVrOnce();
+        // PORTS (HEY FUCKASS — STOP CHANGING THESE):
+        //   SlimeVR OSC Out  → 127.0.0.1:29347
+        //   Dendrite listens → 0.0.0.0:29347
+        //   Dendrite → VMT   → 127.0.0.1:39570
 
-        Console.WriteLine($"[Dendrite] Listening for SlimeVR OSC on 0.0.0.0:{SlimePort}");
-        Console.WriteLine($"[Dendrite] Forwarding to VMT at {VmtIp}:{VmtPort}");
-        Console.WriteLine("[Dendrite] Rotation-only relay. Ctrl+C to stop.");
-        Console.WriteLine();
-        Console.WriteLine("[Dendrite] If you see NO 'RX' logs below, SlimeVR is not hitting port 9002.");
-        Console.WriteLine("[Dendrite] Check SlimeVR OSC settings: IP 127.0.0.1, port 9002.");
-        Console.WriteLine();
+        private const int SlimePort = 29347;
+        private const string VmtIp = "127.0.0.1";
+        private const int VmtPort = 39570;
 
-        // Try to bind the UDP port, but fail gracefully if something else is using it
-        UdpClient slimeClient;
+        private const string SteamVrAppKey = "dendrite.osc.bridge";
+        private const bool DebugLogging = true;
 
-        try
+        public static void Main()
         {
-            slimeClient = new UdpClient(SlimePort);
-        }
-        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"[Dendrite] ERROR: Could not bind to UDP port {SlimePort}.");
-            Console.WriteLine("[Dendrite] Something else is already using this port.");
-            PrintPortUsageInfo(SlimePort);
-            Console.WriteLine();
-            Console.WriteLine("Press Enter to exit...");
-            Console.ReadLine();
-            return;
-        }
-        catch (SocketException ex)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"[Dendrite] ERROR: Failed to bind UDP socket on port {SlimePort}: {ex.Message}");
-            Console.WriteLine();
-            Console.WriteLine("Press Enter to exit...");
-            Console.ReadLine();
-            return;
-        }
+            Console.OutputEncoding = Encoding.UTF8;
+            DrawHeader();
 
-        using var vmtClient = new UdpClient();
-        var vmtEndpoint = new IPEndPoint(IPAddress.Parse(VmtIp), VmtPort);
+            TryRegisterWithSteamVrOnce();
 
-        while (true)
-        {
-            IPEndPoint? remote = null;
-            byte[] data;
+            Console.WriteLine($"[Dendrite] Listening for SlimeVR OSC on 0.0.0.0:{SlimePort}");
+            Console.WriteLine($"[Dendrite] Forwarding to VMT at {VmtIp}:{VmtPort}");
+            Console.WriteLine("[Dendrite] Rotation-only relay. Ctrl+C to stop.\n");
+            Console.WriteLine($"[Dendrite] If you see NO 'RX' logs below, SlimeVR is not hitting port {SlimePort}.");
+            Console.WriteLine($"[Dendrite] Check SlimeVR OSC settings: IP 127.0.0.1, port {SlimePort}.\n");
 
+            UdpClient slimeClient;
             try
             {
-                data = slimeClient.Receive(ref remote!);
+                slimeClient = new UdpClient(SlimePort);
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+            {
+                Console.WriteLine($"\n[Dendrite] ERROR: Could not bind to UDP port {SlimePort}.");
+                Console.WriteLine("[Dendrite] Something is already using this port.\n");
+                PrintPortUsageInfo(SlimePort);
+                Console.Write("\nPress Enter to exit...");
+                Console.ReadLine();
+                return;
             }
             catch (SocketException ex)
             {
-                Console.WriteLine($"[Dendrite] Socket error while receiving: {ex.Message}");
-                continue;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Dendrite] Unexpected receive error: {ex.Message}");
-                continue;
+                Console.WriteLine($"\n[Dendrite] ERROR binding UDP port {SlimePort}: {ex.Message}");
+                Console.Write("\nPress Enter to exit...");
+                Console.ReadLine();
+                return;
             }
 
-            var msg = OscMessage.Parse(data);
-            if (msg == null)
+            using (slimeClient)
+            using (var vmtClient = new UdpClient())
             {
-                if (DebugLogging)
-                    Console.WriteLine("[Dendrite] RX: Failed to parse OSC message (ignored).");
-                continue;
-            }
+                var vmtEndpoint = new IPEndPoint(IPAddress.Parse(VmtIp), VmtPort);
 
-            if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
-            {
-                if (DebugLogging)
-                    Console.WriteLine($"[Dendrite] RX: Non-tracker OSC address '{msg.Address}' (ignored).");
-                continue;
-            }
-
-            var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 4)
-            {
-                if (DebugLogging)
-                    Console.WriteLine($"[Dendrite] RX: Malformed address '{msg.Address}' (ignored).");
-                continue;
-            }
-
-            // By default we expect /tracking/trackers/<name>/rotation
-            var trackerName = parts[2];
-            var field = parts[3];
-
-            if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
-            {
-                if (DebugLogging)
-                    Console.WriteLine($"[Dendrite] RX: {trackerName} field '{field}' (not rotation, ignored).");
-                continue;
-            }
-
-            if (msg.Arguments.Count < 3)
-            {
-                if (DebugLogging)
-                    Console.WriteLine($"[Dendrite] RX: {trackerName} rotation has < 3 args (ignored).");
-                continue;
-            }
-
-            // For now, just log the tracker name and treat it as index 0
-            // You can map names -> indices here if needed.
-            int index = 0;
-
-            float rx = msg.GetFloat(0);
-            float ry = msg.GetFloat(1);
-            float rz = msg.GetFloat(2);
-
-            if (DebugLogging)
-            {
-                Console.WriteLine(
-                    $"[Dendrite] RX SlimeVR: tracker='{trackerName}' idx={index} rot=({rx:0.000}, {ry:0.000}, {rz:0.000})");
-            }
-
-            // VMT /VMT/Room/UEuler:
-            //   i: index, i: enabled, f: timeoffset,
-            //   fff: position, fff: rotation
-            var args = new object[]
-            {
-                index,
-                1,
-                0.0f,
-                0.0f, 0.0f, 0.0f,
-                rx, ry, rz
-            };
-
-            byte[] vmtBytes;
-            try
-            {
-                vmtBytes = OscMessage.Build("/VMT/Room/UEuler", "iiffffffff", args);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Dendrite] OSC build error: {ex.Message}");
-                continue;
-            }
-
-            try
-            {
-                vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
-
-                if (DebugLogging)
+                while (true)
                 {
-                    Console.WriteLine(
-                        $"[Dendrite] TX VMT: idx={index} rot=({rx:0.000}, {ry:0.000}, {rz:0.000}) bytes={vmtBytes.Length}");
+                    IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                    byte[] data;
+                    try
+                    {
+                        data = slimeClient.Receive(ref remote);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Dendrite] Receive error: {ex.Message}");
+                        continue;
+                    }
+
+                    var msg = OscMessage.Parse(data);
+                    if (msg == null)
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine("[Dendrite] RX: Unparseable OSC packet (ignored).");
+                        continue;
+                    }
+
+                    if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] RX: Non-tracker OSC '{msg.Address}'.");
+                        continue;
+                    }
+
+                    var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 4)
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] RX: Malformed OSC address '{msg.Address}'.");
+                        continue;
+                    }
+
+                    string trackerIdRaw = parts[2];
+                    string field = parts[3];
+
+                    if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] RX: Field '{field}' ignored.");
+                        continue;
+                    }
+
+                    if (!int.TryParse(trackerIdRaw, out int trackerId))
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] RX: Tracker '{trackerIdRaw}' is not numeric.");
+                        continue;
+                    }
+
+                    if (trackerId < 1 || trackerId > 8)
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] RX: Tracker ID {trackerId} outside 1–8.");
+                        continue;
+                    }
+
+                    int vmtIndex = trackerId - 1;
+
+                    if (msg.Arguments.Count < 3)
+                    {
+                        if (DebugLogging)
+                            Console.WriteLine("[Dendrite] RX: Rotation missing args.");
+                        continue;
+                    }
+
+                    float rx = msg.GetFloat(0);
+                    float ry = msg.GetFloat(1);
+                    float rz = msg.GetFloat(2);
+
+                    if (DebugLogging)
+                        Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
+
+                    var args = new object[]
+                    {
+                        vmtIndex,
+                        1,
+                        0.0f,
+                        0.0f, 0.0f, 0.0f,
+                        rx, ry, rz
+                    };
+
+                    byte[] vmtBytes;
+                    try
+                    {
+                        vmtBytes = OscMessage.Build("/VMT/Room/UEuler", "iiffffffff", args);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Dendrite] Build error: {ex.Message}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
+                        if (DebugLogging)
+                            Console.WriteLine($"[Dendrite] TX VMT idx {vmtIndex}: ({rx:F3}, {ry:F3}, {rz:F3})");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Dendrite] Send error: {ex.Message}");
+                    }
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Dendrite] Failed to send to VMT: {ex.Message}");
-            }
         }
-    }
 
-    // -------------------------------------------------------------------
-    // One-time SteamVR registration helper
-    // -------------------------------------------------------------------
-    private static void TryRegisterWithSteamVrOnce()
-    {
-        try
+        // -------------------------------------------------------------------
+        // SteamVR auto-registration
+        // -------------------------------------------------------------------
+        private static void TryRegisterWithSteamVrOnce()
         {
-            string baseDir = AppContext.BaseDirectory;
-            string flagPath = Path.Combine(baseDir, "dendrite_steamvr_registered.flag");
-
-            if (File.Exists(flagPath))
+            try
             {
-                Console.WriteLine("[Dendrite] SteamVR registration already attempted (flag file present).");
-                return;
-            }
+                string baseDir = AppContext.BaseDirectory;
+                string flagPath = Path.Combine(baseDir, "dendrite_steamvr_registered.flag");
 
-            string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
-            if (string.IsNullOrEmpty(exePath))
-            {
-                Console.WriteLine("[Dendrite] Could not determine own exe path for SteamVR registration.");
-                return;
-            }
+                if (File.Exists(flagPath))
+                {
+                    Console.WriteLine("[Dendrite] SteamVR registration already attempted.");
+                    return;
+                }
 
-            string manifestPath = Path.Combine(baseDir, "dendrite.vrmanifest");
+                string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                if (string.IsNullOrEmpty(exePath))
+                    return;
 
-            string manifestJson = $@"{{
+                string manifestPath = Path.Combine(baseDir, "dendrite.vrmanifest");
+
+                string manifestJson = $@"{{
   ""source"": ""user"",
   ""applications"": [
     {{
@@ -229,372 +213,330 @@ internal static class Program
       ""launch_type"": ""binary"",
       ""binary_path"": ""{exePath.Replace("\\", "\\\\")}"",
       ""arguments"": """",
-      ""is_dashboard_overlay"": false,
-      ""is_background"": true,
-      ""last_launch_time"": 0
+      ""is_background"": true
     }}
   ]
 }}";
 
-            File.WriteAllText(manifestPath, manifestJson, Encoding.UTF8);
+                File.WriteAllText(manifestPath, manifestJson);
 
-            string? vrpathregPath = FindVrPathReg();
-            if (vrpathregPath == null)
-            {
-                Console.WriteLine("[Dendrite] Could not find vrpathreg.exe –");
-                Console.WriteLine("          SteamVR manifest created as dendrite.vrmanifest,");
-                Console.WriteLine("          but you may need to register it manually.");
+                string? vrpathreg = FindVrPathReg();
+                if (vrpathreg == null)
+                {
+                    Console.WriteLine("[Dendrite] Could not find vrpathreg.exe – manifest saved, manual registration may be required.");
+                }
+                else
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = vrpathreg,
+                        Arguments = $"addapplication \"{manifestPath}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using var proc = Process.Start(psi);
+                    proc?.WaitForExit(3000);
+                    Console.WriteLine("[Dendrite] SteamVR registration attempted via vrpathreg.exe.");
+                }
+
+                File.WriteAllText(flagPath, "ok");
             }
-            else
+            catch (Exception ex)
             {
+                Console.WriteLine($"[Dendrite] SteamVR registration failed: {ex.Message}");
+            }
+        }
+
+        private static string? FindVrPathReg()
+        {
+            string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            string[] paths =
+            {
+                Path.Combine(pf86, "Steam", "steamapps", "common", "SteamVR", "bin", "win64", "vrpathreg.exe"),
+                Path.Combine(pf86, "Steam", "steamapps", "common", "SteamVR", "bin", "win32", "vrpathreg.exe")
+            };
+
+            foreach (var p in paths)
+            {
+                if (File.Exists(p))
+                    return p;
+            }
+
+            return null;
+        }
+
+        // -------------------------------------------------------------------
+        // Port snitching (netstat + tasklist)
+        // -------------------------------------------------------------------
+        private static void PrintPortUsageInfo(int port)
+        {
+            try
+            {
+                Console.WriteLine($"[Dendrite] Checking UDP port {port}…");
+
                 var psi = new ProcessStartInfo
                 {
-                    FileName = vrpathregPath,
-                    Arguments = $"addapplication \"{manifestPath}\"",
+                    FileName = "netstat",
+                    Arguments = "-ano -p udp",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
 
                 using var proc = Process.Start(psi);
-                proc?.WaitForExit(3000);
-
-                Console.WriteLine("[Dendrite] Attempted SteamVR app registration via vrpathreg.exe.");
-                Console.WriteLine("          Now go to SteamVR → Settings → Startup / Shutdown");
-                Console.WriteLine("          and enable Dendrite in the list (one-time toggle).");
-            }
-
-            File.WriteAllText(flagPath, "ok");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Dendrite] SteamVR registration attempt failed: {ex.Message}");
-        }
-    }
-
-    private static string? FindVrPathReg()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                "Steam", "steamapps", "common", "SteamVR", "bin", "win64", "vrpathreg.exe"
-            ),
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                "Steam", "steamapps", "common", "SteamVR", "bin", "win32", "vrpathreg.exe"
-            )
-        };
-
-        foreach (var path in candidates)
-        {
-            if (File.Exists(path))
-                return path;
-        }
-
-        return null;
-    }
-
-    // -------------------------------------------------------------------
-    // Port usage inspector (who is hogging my UDP port?)
-    // -------------------------------------------------------------------
-    private static void PrintPortUsageInfo(int port)
-    {
-        try
-        {
-            Console.WriteLine();
-            Console.WriteLine($"[Dendrite] Trying to see who is using UDP port {port} (via netstat/tasklist)…");
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = "netstat",
-                Arguments = "-ano -p udp",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using var proc = Process.Start(psi);
-            if (proc == null)
-            {
-                Console.WriteLine("[Dendrite] netstat did not start.");
-                return;
-            }
-
-            string output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(3000);
-
-            var lines = output.Split('\n');
-            var pids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var rawLine in lines)
-            {
-                var line = rawLine.Trim();
-                if (line.Length == 0)
-                    continue;
-                if (!line.StartsWith("UDP", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (!line.Contains($":{port}"))
-                    continue;
-
-                var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 5)
-                    continue;
-
-                string pid = parts[^1];
-                if (!string.IsNullOrWhiteSpace(pid))
-                    pids.Add(pid);
-            }
-
-            if (pids.Count == 0)
-            {
-                Console.WriteLine($"[Dendrite] Could not find any processes using UDP {port} via netstat.");
-                return;
-            }
-
-            Console.WriteLine($"[Dendrite] netstat shows these PIDs using UDP {port}: {string.Join(", ", pids)}");
-
-            foreach (var pid in pids)
-            {
-                try
+                if (proc == null)
                 {
-                    var psiTasklist = new ProcessStartInfo
+                    Console.WriteLine("[Dendrite] netstat failed to start.");
+                    return;
+                }
+
+                string output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit(2000);
+
+                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                var pids = new HashSet<string>();
+
+                foreach (var line in lines)
+                {
+                    if (!line.Contains($":{port}"))
+                        continue;
+
+                    var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 5)
+                        continue;
+
+                    string pid = parts[^1];
+                    if (!string.IsNullOrWhiteSpace(pid))
+                        pids.Add(pid);
+                }
+
+                if (pids.Count == 0)
+                {
+                    Console.WriteLine($"[Dendrite] netstat found nothing using UDP {port}.");
+                    return;
+                }
+
+                Console.WriteLine($"[Dendrite] PIDs using UDP {port}: {string.Join(", ", pids)}");
+
+                foreach (var pid in pids)
+                {
+                    var tpsi = new ProcessStartInfo
                     {
                         FileName = "tasklist",
                         Arguments = $"/FI \"PID eq {pid}\"",
-                        UseShellExecute = false,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
+                        UseShellExecute = false,
                         CreateNoWindow = true
                     };
 
-                    using var taskProc = Process.Start(psiTasklist);
-                    if (taskProc == null)
+                    using var tproc = Process.Start(tpsi);
+                    if (tproc == null)
                         continue;
 
-                    string tlOut = taskProc.StandardOutput.ReadToEnd();
-                    taskProc.WaitForExit(3000);
+                    string tout = tproc.StandardOutput.ReadToEnd();
+                    tproc.WaitForExit(2000);
 
-                    var tlLines = tlOut.Split('\n');
-                    foreach (var tlRaw in tlLines)
+                    foreach (var tl in tout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                     {
-                        var tl = tlRaw.Trim();
-                        if (tl.Length == 0)
+                        var trimmed = tl.Trim();
+                        if (trimmed.StartsWith("Image Name", StringComparison.OrdinalIgnoreCase))
                             continue;
-                        if (tl.StartsWith("Image Name", StringComparison.OrdinalIgnoreCase))
+                        if (trimmed.StartsWith("=", StringComparison.Ordinal))
                             continue;
-                        if (tl.StartsWith("=", StringComparison.Ordinal))
+                        if (trimmed.Length == 0)
                             continue;
-                        if (char.IsLetterOrDigit(tl[0]))
+                        if (trimmed.Contains(pid))
                         {
-                            Console.WriteLine($"[Dendrite] PID {pid} → {tl}");
+                            Console.WriteLine($"[Dendrite] PID {pid} -> {trimmed}");
                             break;
                         }
                     }
                 }
-                catch
-                {
-                    // ignore tasklist failure
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dendrite] Port sniffer error: {ex.Message}");
             }
         }
-        catch (Exception ex)
+
+        private static void DrawHeader()
         {
-            Console.WriteLine($"[Dendrite] Failed to run netstat/tasklist: {ex.Message}");
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // Cosmetics
-    // -------------------------------------------------------------------
-    private static void DrawHeader()
-    {
-        Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║                           DENDRITE                           ║");
-        Console.WriteLine("║        Ultra lightweight SlimeVR → VMT → PSMSx forwarder     ║");
-        Console.WriteLine("║                      (it do the beep boop)                   ║");
-        Console.WriteLine("╠══════════════════════════════════════════════════════════════╣");
-        Console.WriteLine("║  PORTS (HEY FUCKASS — STOP CHANGING THESE):                  ║");
-        Console.WriteLine("║      SlimeVR OSC Out  → 127.0.0.1:9002                       ║");
-        Console.WriteLine("║      Dendrite listens → 0.0.0.0:9002                         ║");
-        Console.WriteLine("║      Dendrite → VMT   → 127.0.0.1:39570                      ║");
-        Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
-        Console.WriteLine();
-    }
-
-    // ===================================================================
-    //  Minimal OSC implementation
-    // ===================================================================
-
-    private sealed class OscMessage
-    {
-        public string Address { get; }
-        public string TypeTag { get; }
-        public List<object> Arguments { get; } = new();
-
-        private OscMessage(string address, string typeTag)
-        {
-            Address = address;
-            TypeTag = typeTag;
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║                           DENDRITE                           ║");
+            Console.WriteLine("║       Ultra lightweight SlimeVR → VMT → PSMSx forwarder      ║");
+            Console.WriteLine("║                        (it do the beep boop)                 ║");
+            Console.WriteLine("╠══════════════════════════════════════════════════════════════╣");
+            Console.WriteLine("║  PORTS (HEY FUCKASS — STOP CHANGING THESE):                  ║");
+            Console.WriteLine($"║      SlimeVR OSC Out  → 127.0.0.1:{SlimePort,-5}                     ║");
+            Console.WriteLine($"║      Dendrite listens → 0.0.0.0:{SlimePort,-5}                      ║");
+            Console.WriteLine($"║      Dendrite → VMT   → 127.0.0.1:{VmtPort,-5}                     ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
         }
 
-        public static OscMessage? Parse(byte[] data)
+        // ===================================================================
+        //  Minimal OSC implementation
+        // ===================================================================
+        private sealed class OscMessage
         {
-            if (data == null || data.Length == 0)
-                return null;
+            public string Address { get; }
+            public string TypeTag { get; }
+            public List<object> Arguments { get; } = new List<object>();
 
-            int index = 0;
-            try
+            private OscMessage(string address, string typeTag)
             {
-                string address = ReadString(data, ref index);
-                if (string.IsNullOrEmpty(address))
+                Address = address;
+                TypeTag = typeTag;
+            }
+
+            public static OscMessage? Parse(byte[] data)
+            {
+                if (data == null || data.Length < 4)
                     return null;
 
-                string typeTag = ReadString(data, ref index);
-                if (string.IsNullOrEmpty(typeTag) || typeTag[0] != ',')
-                    return null;
-
-                var msg = new OscMessage(address, typeTag);
-
-                for (int i = 1; i < typeTag.Length; i++)
+                int index = 0;
+                try
                 {
-                    char t = typeTag[i];
+                    string address = ReadString(data, ref index);
+                    if (string.IsNullOrEmpty(address))
+                        return null;
+
+                    string tags = ReadString(data, ref index);
+                    if (string.IsNullOrEmpty(tags) || !tags.StartsWith(",", StringComparison.Ordinal))
+                        return null;
+
+                    var msg = new OscMessage(address, tags);
+
+                    for (int i = 1; i < tags.Length; i++)
+                    {
+                        char t = tags[i];
+                        switch (t)
+                        {
+                            case 'i':
+                                msg.Arguments.Add(ReadInt(data, ref index));
+                                break;
+                            case 'f':
+                                msg.Arguments.Add(ReadFloat(data, ref index));
+                                break;
+                            case 's':
+                                msg.Arguments.Add(ReadString(data, ref index));
+                                break;
+                            default:
+                                return null;
+                        }
+                    }
+
+                    return msg;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            public float GetFloat(int index)
+            {
+                if (index < 0 || index >= Arguments.Count)
+                    return 0f;
+
+                return Arguments[index] switch
+                {
+                    float f => f,
+                    int i => i,
+                    _ => 0f
+                };
+            }
+
+            public static byte[] Build(string address, string tags, object[] args)
+            {
+                if (address == null) throw new ArgumentNullException(nameof(address));
+                if (tags == null) throw new ArgumentNullException(nameof(tags));
+                if (args == null) throw new ArgumentNullException(nameof(args));
+                if (tags.Length != args.Length) throw new ArgumentException("tags length must equal args length.");
+
+                var buf = new List<byte>();
+                WriteString(buf, address);
+                WriteString(buf, "," + tags);
+
+                for (int i = 0; i < tags.Length; i++)
+                {
+                    char t = tags[i];
+                    object a = args[i];
+
                     switch (t)
                     {
                         case 'i':
-                            msg.Arguments.Add(ReadInt(data, ref index));
+                            WriteInt(buf, Convert.ToInt32(a));
                             break;
                         case 'f':
-                            msg.Arguments.Add(ReadFloat(data, ref index));
+                            WriteFloat(buf, Convert.ToSingle(a));
                             break;
                         case 's':
-                            msg.Arguments.Add(ReadString(data, ref index));
+                            WriteString(buf, Convert.ToString(a) ?? string.Empty);
                             break;
                         default:
-                            return null;
+                            throw new NotSupportedException($"OSC type '{t}' not supported.");
                     }
                 }
 
-                return msg;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        public float GetFloat(int idx)
-        {
-            if (idx < 0 || idx >= Arguments.Count)
-                return 0f;
-
-            return Arguments[idx] switch
-            {
-                float f => f,
-                int i   => i,
-                _       => 0f
-            };
-        }
-
-        public static byte[] Build(string address, string typeTags, object[] args)
-        {
-            if (address is null) throw new ArgumentNullException(nameof(address));
-            if (typeTags is null) throw new ArgumentNullException(nameof(typeTags));
-            if (args is null) throw new ArgumentNullException(nameof(args));
-            if (typeTags.Length != args.Length)
-                throw new ArgumentException("typeTags length must match args length.");
-
-            var buf = new List<byte>(address.Length + typeTags.Length * 4 + 32);
-
-            WriteString(buf, address);
-            WriteString(buf, "," + typeTags);
-
-            for (int i = 0; i < typeTags.Length; i++)
-            {
-                char t = typeTags[i];
-                object a = args[i];
-
-                switch (t)
-                {
-                    case 'i':
-                        WriteInt(buf, Convert.ToInt32(a));
-                        break;
-                    case 'f':
-                        WriteFloat(buf, Convert.ToSingle(a));
-                        break;
-                    case 's':
-                        WriteString(buf, Convert.ToString(a) ?? string.Empty);
-                        break;
-                    default:
-                        throw new NotSupportedException($"OSC type '{t}' not supported.");
-                }
+                return buf.ToArray();
             }
 
-            return buf.ToArray();
-        }
+            private static string ReadString(byte[] data, ref int index)
+            {
+                int start = index;
+                while (index < data.Length && data[index] != 0)
+                    index++;
 
-        private static string ReadString(byte[] data, ref int index)
-        {
-            int len = data.Length;
-            if (index >= len)
-                return string.Empty;
-
-            int start = index;
-            while (index < len && data[index] != 0)
+                string s = Encoding.ASCII.GetString(data, start, index - start);
                 index++;
 
-            string s = Encoding.ASCII.GetString(data, start, index - start);
+                while (index % 4 != 0 && index < data.Length)
+                    index++;
 
-            if (index < len && data[index] == 0)
-                index++;
+                return s;
+            }
 
-            while (index < len && (index & 0x3) != 0)
-                index++;
+            private static int ReadInt(byte[] data, ref int index)
+            {
+                if (index + 4 > data.Length)
+                    throw new IndexOutOfRangeException();
 
-            return s;
-        }
+                int v = (data[index] << 24) | (data[index + 1] << 16) | (data[index + 2] << 8) | data[index + 3];
+                index += 4;
+                return v;
+            }
 
-        private static int ReadInt(byte[] data, ref int index)
-        {
-            if (index + 4 > data.Length) throw new IndexOutOfRangeException();
+            private static float ReadFloat(byte[] data, ref int index)
+            {
+                int v = ReadInt(data, ref index);
+                return BitConverter.Int32BitsToSingle(v);
+            }
 
-            int b0 = data[index++];
-            int b1 = data[index++];
-            int b2 = data[index++];
-            int b3 = data[index++];
-
-            int value = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
-            return value;
-        }
-
-        private static float ReadFloat(byte[] data, ref int index)
-        {
-            int raw = ReadInt(data, ref index);
-            return BitConverter.Int32BitsToSingle(raw);
-        }
-
-        private static void WriteString(List<byte> buf, string s)
-        {
-            var bytes = Encoding.ASCII.GetBytes(s);
-            buf.AddRange(bytes);
-            buf.Add(0);
-
-            while ((buf.Count & 0x3) != 0)
+            private static void WriteString(List<byte> buf, string s)
+            {
+                var bytes = Encoding.ASCII.GetBytes(s);
+                buf.AddRange(bytes);
                 buf.Add(0);
-        }
 
-        private static void WriteInt(List<byte> buf, int value)
-        {
-            buf.Add((byte)((value >> 24) & 0xFF));
-            buf.Add((byte)((value >> 16) & 0xFF));
-            buf.Add((byte)((value >> 8) & 0xFF));
-            buf.Add((byte)(value & 0xFF));
-        }
+                while (buf.Count % 4 != 0)
+                    buf.Add(0);
+            }
 
-        private static void WriteFloat(List<byte> buf, float value)
-        {
-            int raw = BitConverter.SingleToInt32Bits(value);
-            WriteInt(buf, raw);
+            private static void WriteInt(List<byte> buf, int v)
+            {
+                buf.Add((byte)((v >> 24) & 0xFF));
+                buf.Add((byte)((v >> 16) & 0xFF));
+                buf.Add((byte)((v >> 8) & 0xFF));
+                buf.Add((byte)(v & 0xFF));
+            }
+
+            private static void WriteFloat(List<byte> buf, float f)
+            {
+                WriteInt(buf, BitConverter.SingleToInt32Bits(f));
+            }
         }
     }
 }
