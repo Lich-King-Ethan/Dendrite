@@ -28,6 +28,9 @@ internal static class Program
     // One-time SteamVR registration
     private const string SteamVrAppKey = "dendrite.osc.bridge";
 
+    // Debug logging toggle
+    private const bool DebugLogging = true;
+
     // Map SlimeVR tracker names -> VMT tracker indices
     private static readonly Dictionary<string, int> TrackerIndexMap =
         new(StringComparer.OrdinalIgnoreCase)
@@ -52,6 +55,9 @@ internal static class Program
         Console.WriteLine($"[Dendrite] Listening for SlimeVR OSC on 0.0.0.0:{SlimePort}");
         Console.WriteLine($"[Dendrite] Forwarding to VMT at {VmtIp}:{VmtPort}");
         Console.WriteLine("[Dendrite] Rotation-only relay. Ctrl+C to stop.");
+        Console.WriteLine();
+        Console.WriteLine("[Dendrite] If you see NO 'RX' logs below, SlimeVR is not hitting port 9002.");
+        Console.WriteLine("[Dendrite] Check SlimeVR OSC settings: IP 127.0.0.1, port 9002.");
         Console.WriteLine();
 
         using var slimeClient = new UdpClient(SlimePort);
@@ -84,31 +90,60 @@ internal static class Program
 
             var msg = OscMessage.Parse(data);
             if (msg == null)
+            {
+                if (DebugLogging)
+                    Console.WriteLine("[Dendrite] RX: Failed to parse OSC message (ignored).");
                 continue;
+            }
 
-            // Expect: /tracking/trackers/<trackerName>/rotation
             if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
+            {
+                if (DebugLogging)
+                    Console.WriteLine($"[Dendrite] RX: Non-tracker OSC address '{msg.Address}' (ignored).");
                 continue;
+            }
 
             var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 4)
+            {
+                if (DebugLogging)
+                    Console.WriteLine($"[Dendrite] RX: Malformed address '{msg.Address}' (ignored).");
                 continue;
+            }
 
             var trackerName = parts[2];
             var field = parts[3];
 
             if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
+            {
+                if (DebugLogging)
+                    Console.WriteLine($"[Dendrite] RX: {trackerName} field '{field}' (not rotation, ignored).");
                 continue;
-
-            if (!TrackerIndexMap.TryGetValue(trackerName, out int index))
-                continue;
+            }
 
             if (msg.Arguments.Count < 3)
+            {
+                if (DebugLogging)
+                    Console.WriteLine($"[Dendrite] RX: {trackerName} rotation has < 3 args (ignored).");
                 continue;
+            }
+
+            if (!TrackerIndexMap.TryGetValue(trackerName, out int index))
+            {
+                if (DebugLogging)
+                    Console.WriteLine($"[Dendrite] RX: Unknown tracker '{trackerName}' (no VMT index mapped, ignored).");
+                continue;
+            }
 
             float rx = msg.GetFloat(0);
             float ry = msg.GetFloat(1);
             float rz = msg.GetFloat(2);
+
+            if (DebugLogging)
+            {
+                Console.WriteLine(
+                    $"[Dendrite] RX SlimeVR: tracker='{trackerName}' idx={index} rot=({rx:0.000}, {ry:0.000}, {rz:0.000})");
+            }
 
             // VMT /VMT/Room/UEuler:
             //   i: index, i: enabled, f: timeoffset,
@@ -136,6 +171,12 @@ internal static class Program
             try
             {
                 vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
+
+                if (DebugLogging)
+                {
+                    Console.WriteLine(
+                        $"[Dendrite] TX VMT: idx={index} rot=({rx:0.000}, {ry:0.000}, {rz:0.000}) bytes={vmtBytes.Length}");
+                }
             }
             catch (Exception ex)
             {
@@ -169,7 +210,6 @@ internal static class Program
 
             string manifestPath = Path.Combine(baseDir, "dendrite.vrmanifest");
 
-            // Create a basic SteamVR app manifest
             string manifestJson = $@"{{
   ""source"": ""user"",
   ""applications"": [
@@ -412,28 +452,4 @@ internal static class Program
             return BitConverter.Int32BitsToSingle(raw);
         }
 
-        private static void WriteString(List<byte> buf, string s)
-        {
-            var bytes = Encoding.ASCII.GetBytes(s);
-            buf.AddRange(bytes);
-            buf.Add(0);
-
-            while ((buf.Count & 0x3) != 0)
-                buf.Add(0);
-        }
-
-        private static void WriteInt(List<byte> buf, int value)
-        {
-            buf.Add((byte)((value >> 24) & 0xFF));
-            buf.Add((byte)((value >> 16) & 0xFF));
-            buf.Add((byte)((value >> 8) & 0xFF));
-            buf.Add((byte)(value & 0xFF));
-        }
-
-        private static void WriteFloat(List<byte> buf, float value)
-        {
-            int raw = BitConverter.SingleToInt32Bits(value);
-            WriteInt(buf, raw);
-        }
-    }
-}
+        private static voi
