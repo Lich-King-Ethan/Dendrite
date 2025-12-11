@@ -452,4 +452,28 @@ internal static class Program
             return BitConverter.Int32BitsToSingle(raw);
         }
 
-        private static voi
+        private static void WriteString(List<byte> buf, string s)
+        {
+            var bytes = Encoding.ASCII.GetBytes(s);
+            buf.AddRange(bytes);
+            buf.Add(0);
+
+            while ((buf.Count & 0x3) != 0)
+                buf.Add(0);
+        }
+
+        private static void WriteInt(List<byte> buf, int value)
+        {
+            buf.Add((byte)((value >> 24) & 0xFF));
+            buf.Add((byte)((value >> 16) & 0xFF));
+            buf.Add((byte)((value >> 8) & 0xFF));
+            buf.Add((byte)(value & 0xFF));
+        }
+
+        private static void WriteFloat(List<byte> buf, float value)
+        {
+            int raw = BitConverter.SingleToInt32Bits(value);
+            WriteInt(buf, raw);
+        }
+    }
+}
