@@ -12,28 +12,29 @@ namespace Dendrite
     {
         // ===================================================================
         //  DENDRITE
-        //  Ultra lightweight SlimeVR → VMT → PSMSx forwarder
+        //  Ultra lightweight SlimeVR → PSMSx Remote Devices bridge
         //  (it do the beep boop)
         // ===================================================================
 
         // PORTS (HEY FUCKASS — STOP CHANGING THESE):
         //   SlimeVR OSC Out  → 127.0.0.1:29347
         //   Dendrite listens → 0.0.0.0:29347
-        //   Dendrite → VMT   → 127.0.0.1:39570 (OSC /VMT/Room/UEuler)
-        //   Dendrite → PSMSx Remote Devices (binary)
+        //   Dendrite → PSMSx Remote Devices (binary SlimeVR net protocol)
         //       → 192.168.0.243:6969
 
         private const int SlimePort = 29347;
 
-        private const string VmtIp = "127.0.0.1";
-        private const int VmtPort = 39570;
-
-        // PSMSx Remote Devices socket (your static LAN IP + port)
+        // PSMSx / VDM Remote Devices listener (your static IP)
         private const string PsmsIp = "192.168.0.243";
         private const int PsmsPort = 6969;
 
-        private const string SteamVrAppKey = "dendrite.osc.bridge";
+        private const string SteamVrAppKey = "dendrite.psmsx.bridge";
+
         private const bool DebugLogging = true;
+
+        // log throttle: one message per tracker every 3 seconds
+        private static readonly TimeSpan TrackerLogInterval = TimeSpan.FromSeconds(3);
+        private static readonly DateTime[] LastTrackerLog = new DateTime[12];
 
         public static void Main()
         {
@@ -42,11 +43,10 @@ namespace Dendrite
 
             TryRegisterWithSteamVrOnce();
 
-            // Init PSMSx remote devices (12 fake MACs, 12 sockets)
+            // init the 12 PSMSx fake remotes (each with its own source IP + MAC)
             PsmsRemote.Initialize();
 
             Console.WriteLine($"[Dendrite] Listening for SlimeVR OSC on 0.0.0.0:{SlimePort}");
-            Console.WriteLine($"[Dendrite] Forwarding to VMT at {VmtIp}:{VmtPort}");
             Console.WriteLine($"[Dendrite] Forwarding to PSMSx Remote Devices at {PsmsIp}:{PsmsPort}");
             Console.WriteLine("[Dendrite] Rotation-only relay. Ctrl+C to stop.\n");
             Console.WriteLine($"[Dendrite] If you see NO 'RX' logs below, SlimeVR is not hitting port {SlimePort}.");
@@ -75,14 +75,12 @@ namespace Dendrite
             }
 
             using (slimeClient)
-            using (var vmtClient = new UdpClient())
             {
-                var vmtEndpoint = new IPEndPoint(IPAddress.Parse(VmtIp), VmtPort);
-
                 while (true)
                 {
                     IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
                     byte[] data;
+
                     try
                     {
                         data = slimeClient.Receive(ref remote);
@@ -98,122 +96,82 @@ namespace Dendrite
                     }
 
                     bool anyMessage = false;
+
                     foreach (var msg in OscMessage.ParsePacket(data))
                     {
                         anyMessage = true;
 
+                        // Only care about /tracking/trackers/<id>/rotation
                         if (!msg.Address.StartsWith("/tracking/trackers/", StringComparison.Ordinal))
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine($"[Dendrite] RX: Non-tracker OSC '{msg.Address}'.");
                             continue;
-                        }
 
                         var parts = msg.Address.Split('/', StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length < 4)
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine($"[Dendrite] RX: Malformed OSC address '{msg.Address}'.");
                             continue;
-                        }
 
                         string trackerIdRaw = parts[2];
                         string field = parts[3];
 
-                        if (field.Equals("position", StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine("[Dendrite] RX: Field 'position' ignored.");
-                            continue;
-                        }
-
                         if (!field.Equals("rotation", StringComparison.OrdinalIgnoreCase))
                         {
-                            if (DebugLogging)
-                                Console.WriteLine($"[Dendrite] RX: Field '{field}' ignored.");
+                            // positions & anything else: fully ignored, no spam
                             continue;
                         }
 
                         if (!int.TryParse(trackerIdRaw, out int trackerId))
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine($"[Dendrite] RX: Tracker '{trackerIdRaw}' is not numeric.");
                             continue;
-                        }
 
+                        // T1..T12 only
                         if (trackerId < 1 || trackerId > 12)
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine($"[Dendrite] RX: Tracker ID {trackerId} outside 1–12.");
                             continue;
-                        }
 
                         int idx = trackerId - 1;
 
                         if (msg.Arguments.Count < 3)
-                        {
-                            if (DebugLogging)
-                                Console.WriteLine("[Dendrite] RX: Rotation missing args.");
                             continue;
-                        }
 
                         float rx = msg.GetFloat(0);
                         float ry = msg.GetFloat(1);
                         float rz = msg.GetFloat(2);
 
-                        if (DebugLogging)
-                            Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → idx {idx}: ({rx:F3}, {ry:F3}, {rz:F3})");
+                        bool logThis = DebugLogging && ShouldLogTracker(idx);
 
-                        // ---------- VMT OUTPUT (OSC /VMT/Room/UEuler) ----------
-                        var vmtArgs = new object[]
-                        {
-                            idx,
-                            1,
-                            0.0f,
-                            0.0f, 0.0f, 0.0f,
-                            rx, ry, rz
-                        };
+                        if (logThis)
+                            Console.WriteLine($"[Dendrite] RX SlimeVR T{trackerId} → dev {idx}: ({rx:F3}, {ry:F3}, {rz:F3})");
 
-                        byte[] vmtBytes;
-                        try
-                        {
-                            vmtBytes = OscMessage.Build("/VMT/Room/UEuler", "iiffffffff", vmtArgs);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[Dendrite] Build error (VMT): {ex.Message}");
-                            vmtBytes = Array.Empty<byte>();
-                        }
-
-                        if (vmtBytes.Length > 0)
-                        {
-                            try
-                            {
-                                vmtClient.Send(vmtBytes, vmtBytes.Length, vmtEndpoint);
-                                if (DebugLogging)
-                                    Console.WriteLine($"[Dendrite] TX VMT idx {idx}: ({rx:F3}, {ry:F3}, {rz:F3})");
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[Dendrite] Send error (VMT): {ex.Message}");
-                            }
-                        }
-
-                        // ---------- PSMSx REMOTE DEVICES OUTPUT (binary SlimeVR) ----------
-                        PsmsRemote.SendRotation(idx, rx, ry, rz);
+                        // Send to PSMSx: each tracker gets its own "remote device"
+                        // Each remote device has ONE sensor: sensorId = 0
+                        PsmsRemote.SendRotation(idx, rx, ry, rz, logThis);
                     }
 
+                    // If we got a packet but it didn’t parse into any OSC messages, dump a tiny preview
                     if (!anyMessage && DebugLogging)
                     {
-                        Console.WriteLine("[Dendrite] RX: Unparseable OSC packet or bundle (no valid messages).");
                         DumpPacketPreview(data);
                     }
                 }
             }
         }
 
+        private static bool ShouldLogTracker(int idx)
+        {
+            if (idx < 0 || idx >= LastTrackerLog.Length)
+                return false;
+
+            var now = DateTime.UtcNow;
+            var last = LastTrackerLog[idx];
+
+            if (last == default || (now - last) >= TrackerLogInterval)
+            {
+                LastTrackerLog[idx] = now;
+                return true;
+            }
+
+            return false;
+        }
+
         // -------------------------------------------------------------------
-        // SteamVR auto-registration
+        // SteamVR auto-registration (kept, harmless)
         // -------------------------------------------------------------------
         private static void TryRegisterWithSteamVrOnce()
         {
@@ -390,9 +348,6 @@ namespace Dendrite
             }
         }
 
-        // -------------------------------------------------------------------
-        // Packet preview dump (for debugging weird OSC)
-        // -------------------------------------------------------------------
         private static void DumpPacketPreview(byte[] data)
         {
             try
@@ -400,135 +355,158 @@ namespace Dendrite
                 int len = Math.Min(data.Length, 64);
                 var sbHex = new StringBuilder();
                 for (int i = 0; i < len; i++)
-                {
                     sbHex.Append(data[i].ToString("X2")).Append(' ');
-                }
 
-                string ascii = Encoding.ASCII.GetString(data, 0, len);
-                ascii = ascii.Replace("\0", "·");
+                string ascii = Encoding.ASCII.GetString(data, 0, len).Replace("\0", "·");
 
-                Console.WriteLine($"[Dendrite] Packet length: {data.Length} bytes");
+                Console.WriteLine($"[Dendrite] Unparseable packet, length {data.Length} bytes");
                 Console.WriteLine($"[Dendrite] Hex (first {len}): {sbHex}");
                 Console.WriteLine($"[Dendrite] ASCII (first {len}): {ascii}");
             }
-            catch
-            {
-                // best effort only
-            }
+            catch { }
         }
 
         private static void DrawHeader()
         {
             Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
             Console.WriteLine("║                           DENDRITE                           ║");
-            Console.WriteLine("║       Ultra lightweight SlimeVR → VMT → PSMSx forwarder      ║");
+            Console.WriteLine("║          SlimeVR → PSMSx Remote Devices bridge               ║");
             Console.WriteLine("║                        (it do the beep boop)                 ║");
             Console.WriteLine("╠══════════════════════════════════════════════════════════════╣");
             Console.WriteLine("║  PORTS (HEY FUCKASS — STOP CHANGING THESE):                  ║");
             Console.WriteLine($"║      SlimeVR OSC Out  → 127.0.0.1:{SlimePort,-5}                     ║");
             Console.WriteLine($"║      Dendrite listens → 0.0.0.0:{SlimePort,-5}                      ║");
-            Console.WriteLine($"║      Dendrite → VMT   → 127.0.0.1:{VmtPort,-5}                     ║");
             Console.WriteLine($"║      Dendrite → PSMSx → {PsmsIp}:{PsmsPort}                   ║");
             Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
             Console.WriteLine();
         }
 
         // ===================================================================
-        //  PSMSx Remote Devices sender (SlimeVR binary protocol, 12 sockets)
+        //  PSMSx Remote Devices sender
+        //  12 fake boards: each its own local IP + MAC, sensorId=0
         // ===================================================================
         private static class PsmsRemote
         {
             private sealed class RemoteDevice
             {
+                public int TrackerIndex;
+                public string LocalIp = "";
                 public byte[] Mac = new byte[6];
-                public ulong PacketNumber = 1;
-                public bool HandshakeSent = false;
                 public UdpClient? Client;
                 public IPEndPoint? Endpoint;
+                public ulong PacketNumber = 1;
+                public bool HandshakeSent = false;
+                public bool IsAlive = false;
             }
 
-            private static RemoteDevice[] _devices = Array.Empty<RemoteDevice>();
-            private static readonly object _lock = new object();
+            // THESE MUST EXIST as IPv4 aliases on your NIC:
+            // 192.168.0.201 .. 192.168.0.212
+            private static readonly string[] LocalSourceIps =
+            {
+                "192.168.0.201",
+                "192.168.0.202",
+                "192.168.0.203",
+                "192.168.0.204",
+                "192.168.0.205",
+                "192.168.0.206",
+                "192.168.0.207",
+                "192.168.0.208",
+                "192.168.0.209",
+                "192.168.0.210",
+                "192.168.0.211",
+                "192.168.0.212"
+            };
+
+            private static readonly RemoteDevice[] Devices = new RemoteDevice[12];
+            private static readonly object LockObj = new object();
 
             public static void Initialize()
             {
-                try
+                for (int i = 0; i < Devices.Length; i++)
                 {
-                    _devices = new RemoteDevice[12];
-                    for (int i = 0; i < _devices.Length; i++)
+                    Devices[i] = new RemoteDevice
                     {
-                        var dev = new RemoteDevice
-                        {
-                            Mac = new byte[]
-                            {
-                                0xDE, 0xAD, 0xBE, 0xEF, 0x00, (byte)(i + 1)
-                            },
-                            PacketNumber = 1,
-                            HandshakeSent = false,
-                            Client = new UdpClient(0), // bind to ephemeral local port
-                            Endpoint = new IPEndPoint(IPAddress.Parse(PsmsIp), PsmsPort)
-                        };
+                        TrackerIndex = i,
+                        LocalIp = LocalSourceIps[i],
+                        Mac = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, (byte)(i + 1) },
+                        PacketNumber = 1,
+                        HandshakeSent = false,
+                        IsAlive = false
+                    };
+                }
 
-                        _devices[i] = dev;
+                int alive = 0;
+
+                for (int i = 0; i < Devices.Length; i++)
+                {
+                    var dev = Devices[i];
+
+                    try
+                    {
+                        // bind to that exact local IP (requires the alias to exist!)
+                        var localEp = new IPEndPoint(IPAddress.Parse(dev.LocalIp), 0);
+                        dev.Client = new UdpClient(localEp);
+                        dev.Endpoint = new IPEndPoint(IPAddress.Parse(PsmsIp), PsmsPort);
 
                         int localPort = ((IPEndPoint)dev.Client.Client.LocalEndPoint!).Port;
                         string macStr = BitConverter.ToString(dev.Mac);
-                        Console.WriteLine($"[Dendrite] PSMSx device MAC {macStr} using local UDP port {localPort}.");
-                    }
 
-                    // Send initial handshake for all devices
-                    foreach (var dev in _devices)
+                        Console.WriteLine($"[Dendrite] PSMSx dev {i} MAC {macStr} bound {dev.LocalIp}:{localPort} -> {PsmsIp}:{PsmsPort}");
+                        dev.IsAlive = true;
+                        alive++;
+                    }
+                    catch (Exception ex)
                     {
-                        SendHandshake(dev);
+                        Console.WriteLine($"[Dendrite] PSMSx dev {i} FAILED to bind local IP {dev.LocalIp}: {ex.Message}");
+                        dev.IsAlive = false;
                     }
+                }
 
-                    Console.WriteLine($"[Dendrite] PSMSx Remote Devices announced {_devices.Length} MACs at {PsmsIp}:{PsmsPort}.");
-                }
-                catch (Exception ex)
+                // Handshake all alive devices
+                for (int i = 0; i < Devices.Length; i++)
                 {
-                    Console.WriteLine($"[Dendrite] PSMSx Remote init failed: {ex.Message}");
-                    _devices = Array.Empty<RemoteDevice>();
+                    if (Devices[i].IsAlive)
+                        SendHandshake(Devices[i]);
                 }
+
+                Console.WriteLine($"[Dendrite] PSMSx remotes ready: {alive}/12 bound. (Need IPv4 aliases for the missing ones)");
             }
 
-            public static void SendRotation(int trackerIndex, float rxDeg, float ryDeg, float rzDeg)
+            public static void SendRotation(int trackerIndex, float rxDeg, float ryDeg, float rzDeg, bool logThis)
             {
-                if (_devices.Length == 0)
+                if (trackerIndex < 0 || trackerIndex >= Devices.Length)
                     return;
 
-                if (trackerIndex < 0 || trackerIndex >= _devices.Length)
-                    return;
-
-                var dev = _devices[trackerIndex];
-                if (dev.Client == null || dev.Endpoint == null)
+                var dev = Devices[trackerIndex];
+                if (!dev.IsAlive || dev.Client == null || dev.Endpoint == null)
                     return;
 
                 if (!dev.HandshakeSent)
-                {
                     SendHandshake(dev);
-                }
 
                 var q = EulerDegreesToQuaternion(rxDeg, ryDeg, rzDeg);
 
                 byte[] packet;
-                lock (_lock)
+                lock (LockObj)
                 {
                     ulong pn = dev.PacketNumber++;
+                    // ONE sensor per fake device: sensorId=0
                     packet = BuildRotationPacket(0, pn, q.x, q.y, q.z, q.w, 3);
                 }
 
                 try
                 {
                     dev.Client.Send(packet, packet.Length, dev.Endpoint);
-                    if (DebugLogging)
+
+                    if (DebugLogging && logThis)
                     {
                         string macStr = BitConverter.ToString(dev.Mac);
-                        Console.WriteLine($"[Dendrite] TX PSMSx MAC {macStr} (tracker {trackerIndex}) q=({q.x:F3},{q.y:F3},{q.z:F3},{q.w:F3})");
+                        Console.WriteLine($"[Dendrite] TX PSMSx MAC {macStr} (T{trackerIndex + 1}) q=({q.x:F3},{q.y:F3},{q.z:F3},{q.w:F3})");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[Dendrite] PSMSx send error: {ex.Message}");
+                    Console.WriteLine($"[Dendrite] PSMSx send error (T{trackerIndex + 1}): {ex.Message}");
                 }
             }
 
@@ -538,17 +516,21 @@ namespace Dendrite
                     return;
 
                 byte[] packet = BuildHandshakePacket(0, dev.Mac);
+
                 try
                 {
                     dev.Client.Send(packet, packet.Length, dev.Endpoint);
                     dev.HandshakeSent = true;
 
-                    string macStr = BitConverter.ToString(dev.Mac);
-                    Console.WriteLine($"[Dendrite] PSMSx handshake sent for MAC {macStr}.");
+                    if (DebugLogging)
+                    {
+                        string macStr = BitConverter.ToString(dev.Mac);
+                        Console.WriteLine($"[Dendrite] PSMSx handshake sent for MAC {macStr} (src {dev.LocalIp}).");
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[Dendrite] PSMSx handshake send error: {ex.Message}");
+                    Console.WriteLine($"[Dendrite] PSMSx handshake error (src {dev.LocalIp}): {ex.Message}");
                 }
             }
 
@@ -565,32 +547,29 @@ namespace Dendrite
 
                 WriteUInt64BE(bw, packetNumber);
 
-                // Fake board / imu / mcu identifiers
-                WriteInt32BE(bw, 1); // board (pretend ESP32)
-                WriteInt32BE(bw, 0); // imu (unused)
-                WriteInt32BE(bw, 2); // mcu (fake code)
+                // BOARD / IMU / MCU / reserved ints
+                WriteInt32BE(bw, 1); // BOARD (pretend ESP32)
+                WriteInt32BE(bw, 0); // IMU (unused by PSMSx)
+                WriteInt32BE(bw, 2); // MCU (fake id)
                 WriteInt32BE(bw, 0);
                 WriteInt32BE(bw, 0);
                 WriteInt32BE(bw, 0);
 
                 // Firmware build + version
                 WriteInt32BE(bw, 1); // build number
+
                 string version = "Dendrite-Bridge";
                 if (version.Length > 255)
                     version = version.Substring(0, 255);
+
                 bw.Write((byte)version.Length);
                 bw.Write(Encoding.ASCII.GetBytes(version));
 
-                // MAC address (6 bytes)
-                if (mac.Length != 6)
-                {
-                    byte[] fallback = { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
-                    bw.Write(fallback);
-                }
-                else
-                {
+                // MAC (6 bytes)
+                if (mac.Length == 6)
                     bw.Write(mac);
-                }
+                else
+                    bw.Write(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 });
 
                 return ms.ToArray();
             }
@@ -610,7 +589,7 @@ namespace Dendrite
 
                 WriteUInt64BE(bw, packetNumber);
 
-                bw.Write(sensorId);       // sensor ID
+                bw.Write(sensorId);       // sensor ID (always 0 per fake device)
                 bw.Write((byte)1);        // dataType = normal
 
                 WriteFloatBE(bw, qx);
@@ -651,7 +630,7 @@ namespace Dendrite
                 bw.Write(bytes);
             }
 
-            // Euler (deg) → quaternion (x,y,z,w), assuming roll(X), pitch(Y), yaw(Z) order
+            // Euler degrees → Quaternion (x,y,z,w), roll(X), pitch(Y), yaw(Z)
             private static (float x, float y, float z, float w) EulerDegreesToQuaternion(float rxDeg, float ryDeg, float rzDeg)
             {
                 double roll = rxDeg * Math.PI / 180.0;
@@ -675,18 +654,16 @@ namespace Dendrite
         }
 
         // ===================================================================
-        //  Minimal OSC implementation (+ bundle support)
+        //  Minimal OSC parser (bundle + basic types)
         // ===================================================================
         private sealed class OscMessage
         {
             public string Address { get; }
-            public string TypeTag { get; }
             public List<object> Arguments { get; } = new List<object>();
 
-            private OscMessage(string address, string typeTag)
+            private OscMessage(string address)
             {
                 Address = address;
-                TypeTag = typeTag;
             }
 
             public static IEnumerable<OscMessage> ParsePacket(byte[] data)
@@ -697,10 +674,10 @@ namespace Dendrite
                 if (IsBundleHeader(data))
                 {
                     int index = 0;
-                    string _ = ReadString(data, ref index);
+                    _ = ReadString(data, ref index); // "#bundle"
                     if (index + 8 > data.Length)
                         yield break;
-                    index += 8;
+                    index += 8; // timetag
 
                     while (index + 4 <= data.Length)
                     {
@@ -727,9 +704,7 @@ namespace Dendrite
 
             private static bool IsBundleHeader(byte[] data)
             {
-                if (data.Length < 8)
-                    return false;
-
+                if (data.Length < 8) return false;
                 return data[0] == (byte)'#' &&
                        data[1] == (byte)'b' &&
                        data[2] == (byte)'u' &&
@@ -740,11 +715,8 @@ namespace Dendrite
                        data[7] == 0;
             }
 
-            public static OscMessage? Parse(byte[] data)
+            private static OscMessage? Parse(byte[] data)
             {
-                if (data == null || data.Length < 4)
-                    return null;
-
                 int index = 0;
                 try
                 {
@@ -756,7 +728,7 @@ namespace Dendrite
                     if (string.IsNullOrEmpty(tags) || !tags.StartsWith(",", StringComparison.Ordinal))
                         return null;
 
-                    var msg = new OscMessage(address, tags);
+                    var msg = new OscMessage(address);
 
                     for (int i = 1; i < tags.Length; i++)
                     {
@@ -773,7 +745,7 @@ namespace Dendrite
                                 msg.Arguments.Add(ReadString(data, ref index));
                                 break;
                             default:
-                                return null;
+                                return null; // unsupported type
                         }
                     }
 
@@ -796,54 +768,6 @@ namespace Dendrite
                     int i => i,
                     _ => 0f
                 };
-            }
-
-            public static byte[] Build(string address, string tags, object[] args)
-            {
-                if (address == null) throw new ArgumentNullException(nameof(address));
-                if (tags == null) throw new ArgumentNullException(nameof(tags));
-                if (args == null) throw new ArgumentNullException(nameof(args));
-
-                int n = Math.Min(tags.Length, args.Length);
-                if (n <= 0)
-                    throw new ArgumentException("No tags/args to build OSC message.");
-
-                if (tags.Length != n)
-                    tags = tags.Substring(0, n);
-
-                if (args.Length != n)
-                {
-                    var trimmed = new object[n];
-                    Array.Copy(args, trimmed, n);
-                    args = trimmed;
-                }
-
-                var buf = new List<byte>();
-                WriteString(buf, address);
-                WriteString(buf, "," + tags);
-
-                for (int i = 0; i < n; i++)
-                {
-                    char t = tags[i];
-                    object a = args[i];
-
-                    switch (t)
-                    {
-                        case 'i':
-                            WriteInt(buf, Convert.ToInt32(a));
-                            break;
-                        case 'f':
-                            WriteFloat(buf, Convert.ToSingle(a));
-                            break;
-                        case 's':
-                            WriteString(buf, Convert.ToString(a) ?? string.Empty);
-                            break;
-                        default:
-                            throw new NotSupportedException($"OSC type '{t}' not supported.");
-                    }
-                }
-
-                return buf.ToArray();
             }
 
             private static string ReadString(byte[] data, ref int index)
@@ -879,29 +803,6 @@ namespace Dendrite
             {
                 int v = ReadInt(data, ref index);
                 return BitConverter.Int32BitsToSingle(v);
-            }
-
-            private static void WriteString(List<byte> buf, string s)
-            {
-                var bytes = Encoding.ASCII.GetBytes(s);
-                buf.AddRange(bytes);
-                buf.Add(0);
-
-                while (buf.Count % 4 != 0)
-                    buf.Add(0);
-            }
-
-            private static void WriteInt(List<byte> buf, int v)
-            {
-                buf.Add((byte)((v >> 24) & 0xFF));
-                buf.Add((byte)((v >> 16) & 0xFF));
-                buf.Add((byte)((v >> 8) & 0xFF));
-                buf.Add((byte)(v & 0xFF));
-            }
-
-            private static void WriteFloat(List<byte> buf, float f)
-            {
-                WriteInt(buf, BitConverter.SingleToInt32Bits(f));
             }
         }
     }
